@@ -17,6 +17,7 @@ from sglang.srt.utils import (
     get_bool_env_var,
     is_cpu,
     is_hip,
+    is_flashinfer_available,
     set_weight_attrs,
     use_intel_amx_backend,
 )
@@ -103,6 +104,14 @@ class UnquantizedLinearMethod(LinearMethodBase):
         if _is_cpu and _is_cpu_amx_available:
             _amx_process_weight_after_loading(layer, ["weight"])
 
+ENABLE_FLASHINFER_GEMM = (
+    get_bool_env_var("SGLANG_ENABLE_FLASHINFER_GEMM")
+    and is_flashinfer_available()
+)
+
+if ENABLE_FLASHINFER_GEMM:
+    from flashinfer.gemm import gemm_bf16 as flashinfer_gemm_bf16
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -113,6 +122,17 @@ class UnquantizedLinearMethod(LinearMethodBase):
         if use_intel_amx_backend(layer):
             return torch.ops.sgl_kernel.weight_packed_linear(
                 x, layer.weight, bias, True  # is_vnni
+            )
+
+        if ENABLE_FLASHINFER_GEMM:
+            print("flashinfer_gemm_bf16")
+            print("layer", layer.prefix)
+            print("x.shape", x.shape)
+            print("layer.weight.shape", layer.weight.shape)
+            if bias is not None:
+                print("bias.shape", bias.shape)
+            return flashinfer_gemm_bf16(
+                x, layer.weight, bias
             )
 
         return F.linear(x, layer.weight, bias)

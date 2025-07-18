@@ -1382,7 +1382,7 @@ async def benchmark(
         )
     else:
         print(
-            f"Warmup completed with {args.warmup_requests} sequences. Starting main benchmark run..."
+            f"Warmup completed with {warmup_requests} sequences. Starting main benchmark run..."
         )
 
     # Flush cache

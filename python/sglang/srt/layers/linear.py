@@ -127,6 +127,7 @@ class LinearBase(torch.nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        self.prefix = prefix
 
         # Keep input parameters
         self.input_size = input_size
