@@ -23,9 +23,8 @@ from sglang.srt.models.qwen3_omni_moe import Qwen3OmniMoeForConditionalGeneratio
 from sglang.srt.models.qwen3_vl import Qwen3VLForConditionalGeneration
 from sglang.srt.models.qwen3_vl_moe import Qwen3VLMoeForConditionalGeneration
 from sglang.srt.multimodal.processors.base_processor import (
+    BaseMultiModalProcessorOutput,
     BaseMultimodalProcessor as SGLangBaseProcessor,
-)
-from sglang.srt.multimodal.processors.base_processor import (
     MultimodalSpecialTokens,
 )
 from sglang.srt.utils.video_decoder import VideoDecoderWrapper
@@ -276,6 +275,78 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             audio_token_id=self.audio_token_id,
         ).build(_processor)
 
+    @staticmethod
+    def _has_special_format(image_data, video_data, audio_data):
+        for data in list(image_data or []) + list(video_data or []) + list(
+            audio_data or []
+        ):
+            if isinstance(data, dict) and data.get("format") in (
+                "processor_output",
+                "precomputed_embedding",
+            ):
+                return True
+        return False
+
+    def _load_special_format_mm_data(
+        self,
+        *,
+        image_data,
+        video_data,
+        audio_data,
+        input_text,
+    ):
+        if isinstance(input_text, list):
+            user_input_ids = torch.tensor(input_text, dtype=torch.long)
+            prompt = ""
+        else:
+            user_input_ids = None
+            prompt = input_text or ""
+
+        if not prompt and (image_data or video_data or audio_data):
+            images = [d for d in (image_data or []) if isinstance(d, dict)]
+            videos = [d for d in (video_data or []) if isinstance(d, dict)]
+            audios = [d for d in (audio_data or []) if isinstance(d, dict)]
+
+            raw_img_dropped = len(image_data or []) - len(images)
+            raw_vid_dropped = len(video_data or []) - len(videos)
+            raw_aud_dropped = len(audio_data or []) - len(audios)
+            if raw_img_dropped > 0 or raw_vid_dropped > 0 or raw_aud_dropped > 0:
+                raise ValueError(
+                    "[qwen_vl] Cannot process raw media with pre-tokenized input_ids. "
+                    "Provide multimodal data in 'processor_output' or "
+                    "'precomputed_embedding' format, or use a text prompt instead. "
+                    f"(raw images dropped: {raw_img_dropped}, "
+                    f"raw videos dropped: {raw_vid_dropped}, "
+                    f"raw audios dropped: {raw_aud_dropped})"
+                )
+
+            base_output = BaseMultiModalProcessorOutput(
+                input_text=prompt,
+                images=images,
+                videos=videos,
+                audios=audios,
+            )
+        else:
+            base_output = self.load_mm_data(
+                prompt=prompt,
+                image_data=image_data,
+                video_data=video_data,
+                audio_data=audio_data,
+                multimodal_tokens=self.mm_tokens,
+            )
+
+        return base_output, user_input_ids
+
+    def _reset_offsets_for_input_ids(self, mm_items, input_ids):
+        for mm_item in mm_items:
+            mm_token_id = self.mm_tokens.get_token_id_by_modality(mm_item.modality)
+            if mm_token_id is None:
+                raise ValueError(f"No token id found for modality: {mm_item.modality}")
+            mm_item.offsets = self.get_mm_items_offset(
+                input_ids=input_ids,
+                mm_token_id=mm_token_id,
+            )
+
     def build_input_ids_with_timestamps(
         self, prompt, embeddings, img_grid_thw, video_grid_thw, video_timestamps
     ):
@@ -469,23 +540,57 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         **kwargs,
     ):
         entry_time = time.perf_counter()
-        base_output = self.load_mm_data(
-            prompt=input_text,
-            image_data=image_data,
-            video_data=request_obj.video_data,
-            audio_data=request_obj.audio_data,
-            multimodal_tokens=self.mm_tokens,
-        )
+        video_data = getattr(request_obj, "video_data", None) or []
+        audio_data = getattr(request_obj, "audio_data", None) or []
+
+        user_input_ids = None
+        if isinstance(input_text, list) or self._has_special_format(
+            image_data, video_data, audio_data
+        ):
+            base_output, user_input_ids = self._load_special_format_mm_data(
+                image_data=image_data,
+                video_data=video_data,
+                audio_data=audio_data,
+                input_text=input_text,
+            )
+        else:
+            base_output = self.load_mm_data(
+                prompt=input_text,
+                image_data=image_data,
+                video_data=video_data,
+                audio_data=audio_data,
+                multimodal_tokens=self.mm_tokens,
+            )
         load_time = time.perf_counter()
         rid = getattr(request_obj, "rid", "anonymous_rid")
 
         video_metadata = None
         if base_output.videos:
-            videos_processed = [
-                await preprocess_video(video, video_config=self.video_config)
-                for video in base_output.videos
-            ]
-            base_output.videos, video_metadata = map(list, zip(*videos_processed))
+            processed_videos = []
+            processed_metadata = []
+            for video in base_output.videos:
+                # Preserve preprocessed multimodal payloads from offline callers.
+                if (
+                    isinstance(video, dict)
+                    and video.get("format")
+                    in ("processor_output", "precomputed_embedding")
+                ):
+                    processed_videos.append(video)
+                    continue
+
+                processed = await preprocess_video(
+                    video, video_config=self.video_config
+                )
+                if isinstance(processed, tuple) and len(processed) == 2:
+                    processed_video, metadata = processed
+                    processed_videos.append(processed_video)
+                    processed_metadata.append(metadata)
+                else:
+                    processed_videos.append(processed)
+
+            base_output.videos = processed_videos
+            if processed_metadata:
+                video_metadata = processed_metadata
 
         preprocess_time = time.perf_counter()
 
@@ -507,6 +612,10 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
                 base_output, self.mm_tokens
             )
 
+        if user_input_ids is not None:
+            input_ids = user_input_ids
+            self._reset_offsets_for_input_ids(mm_items, input_ids)
+
         audio_feature_lengths = None
 
         if self.model_type == "qwen3_omni_moe":
@@ -519,6 +628,12 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         second_per_grid_ts = getattr(ret, "second_per_grid_ts", None)
         if second_per_grid_ts is None:
             second_per_grid_ts = getattr(ret, "video_second_per_grid", None)
+        if second_per_grid_ts is None and video_data:
+            first_video = video_data[0]
+            if isinstance(first_video, dict):
+                second_per_grid_ts = first_video.get("second_per_grid_ts")
+                if second_per_grid_ts is None:
+                    second_per_grid_ts = first_video.get("video_second_per_grid")
 
         process_time = time.perf_counter()
 
@@ -535,8 +650,8 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         if hasattr(ret, "video_grid_thw"):
             video_grid_thw = ret.video_grid_thw
 
-        if video_grid_thw is None and request_obj.video_data:
-            first_video = request_obj.video_data[0]
+        if video_grid_thw is None and video_data:
+            first_video = video_data[0]
             if isinstance(first_video, dict):
                 video_grid_thw = first_video.get("video_grid_thw")
 
@@ -551,8 +666,8 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             ),
             # use the expanded token ids
             input_ids=input_ids.unsqueeze(0),
-            image_grid_thw=getattr(ret, "image_grid_thw", None),
-            video_grid_thw=getattr(ret, "video_grid_thw", None),
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
             second_per_grid_ts=second_per_grid_ts,
             use_audio_in_video=False,
             audio_seqlens=audio_feature_lengths,
