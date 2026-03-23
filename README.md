@@ -1,3 +1,17 @@
+## Fork Note
+
+This fork currently carries one `Qwen-VL` patch for the `marl` / `TOPReward`
+path:
+
+- `python/sglang/srt/multimodal/processors/qwen_vl.py` now accepts preprocessed
+  multimodal inputs such as `processor_output` and `precomputed_embedding`
+- it also supports caller-provided `input_ids` plus caller-owned video metadata
+  and multimodal offsets, instead of forcing raw video reprocessing inside
+  `sglang`
+
+This is needed for `marl`'s strict TOPReward path over preprocessed video
+inputs.
+
 <div align="center" id="sglangtop">
 <img src="https://raw.githubusercontent.com/sgl-project/sglang/main/assets/logo.png" alt="logo" width="400" margin="10px"></img>
 
