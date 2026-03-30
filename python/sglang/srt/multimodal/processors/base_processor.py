@@ -16,6 +16,7 @@ from sglang.srt.managers.schedule_batch import (
     Modality,
     MultimodalDataItem,
     MultimodalInputFormat,
+    _normalize_json_mm_value,
 )
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import (
@@ -482,7 +483,10 @@ class BaseMultimodalProcessor(ABC):
                 "processor_output",
                 "precomputed_embedding",
             ):
-                return data
+                return {
+                    key: _normalize_json_mm_value(value)
+                    for key, value in data.items()
+                }
         try:
             if modality == Modality.IMAGE:
                 img, _ = load_image(data)

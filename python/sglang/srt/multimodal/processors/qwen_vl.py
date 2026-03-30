@@ -12,7 +12,11 @@ from torchvision.transforms import InterpolationMode
 
 from sglang.srt.environ import envs
 from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
-from sglang.srt.managers.schedule_batch import Modality, MultimodalDataItem
+from sglang.srt.managers.schedule_batch import (
+    Modality,
+    MultimodalDataItem,
+    _normalize_json_mm_value,
+)
 from sglang.srt.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from sglang.srt.models.qwen2_vl import Qwen2VLForConditionalGeneration
 from sglang.srt.models.qwen3_5 import (
@@ -634,6 +638,7 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
                 second_per_grid_ts = first_video.get("second_per_grid_ts")
                 if second_per_grid_ts is None:
                     second_per_grid_ts = first_video.get("video_second_per_grid")
+                second_per_grid_ts = _normalize_json_mm_value(second_per_grid_ts)
 
         process_time = time.perf_counter()
 
@@ -644,7 +649,9 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
             image_grid_thw = ret.image_grid_thw
 
         if image_grid_thw is None and image_data and isinstance(image_data[0], dict):
-            image_grid_thw = image_data[0].get("image_grid_thw")
+            image_grid_thw = _normalize_json_mm_value(
+                image_data[0].get("image_grid_thw")
+            )
 
         video_grid_thw = None
         if hasattr(ret, "video_grid_thw"):
@@ -653,7 +660,9 @@ class QwenVLImageProcessor(SGLangBaseProcessor):
         if video_grid_thw is None and video_data:
             first_video = video_data[0]
             if isinstance(first_video, dict):
-                video_grid_thw = first_video.get("video_grid_thw")
+                video_grid_thw = _normalize_json_mm_value(
+                    first_video.get("video_grid_thw")
+                )
 
         mrope_positions, mrope_position_delta = MRotaryEmbedding.get_rope_index(
             spatial_merge_size=self.hf_config.vision_config.spatial_merge_size,

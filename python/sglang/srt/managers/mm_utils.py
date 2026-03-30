@@ -1362,9 +1362,20 @@ def tensor_hash(tensor_list) -> int:
 
 def hash_feature(f):
     if isinstance(f, list):
+        if len(f) == 0:
+            return data_hash(b"")
         if isinstance(f[0], torch.Tensor):
             return tensor_hash(f)
-        return data_hash(tuple(flatten_nested_list(f)))
+        try:
+            arr = np.asarray(f)
+            if arr.dtype.kind not in {"O", "S", "U"}:
+                if arr.dtype.kind == "f":
+                    arr = arr.astype(np.float32, copy=False)
+                arr = np.ascontiguousarray(arr)
+                return data_hash(arr.tobytes())
+        except Exception:
+            pass
+        return data_hash(pickle.dumps(f, protocol=pickle.HIGHEST_PROTOCOL))
     elif isinstance(f, np.ndarray):
         arr = np.ascontiguousarray(f)
         arr_bytes = arr.tobytes()

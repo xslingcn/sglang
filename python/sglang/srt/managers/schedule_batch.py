@@ -108,6 +108,33 @@ MM_PAD_SHIFT_VALUE = 1_000_000
 logger = logging.getLogger(__name__)
 
 
+def _normalize_json_mm_value(value: Any) -> Any:
+    """Convert numeric JSON arrays back to tensors for multimodal payloads."""
+    if value is None or isinstance(
+        value, (torch.Tensor, np.ndarray, CudaIpcTensorTransportProxy)
+    ):
+        return value
+
+    if isinstance(value, tuple):
+        value = list(value)
+
+    if not isinstance(value, list):
+        return value
+
+    try:
+        arr = np.asarray(value)
+    except Exception:
+        return value
+
+    if arr.dtype.kind in {"O", "S", "U"}:
+        return value
+
+    if arr.dtype.kind == "f":
+        arr = arr.astype(np.float32, copy=False)
+
+    return torch.as_tensor(arr)
+
+
 @lru_cache(maxsize=1)
 def sanity_check_mm_pad_shift_value(vocab_size: int) -> None:
     if vocab_size > MM_PAD_SHIFT_VALUE:
@@ -259,6 +286,7 @@ class MultimodalDataItem:
             )
 
     def __setitem__(self, key: str, value: Any):
+        value = _normalize_json_mm_value(value)
         if key in self.__dict__:
             self.__dict__[key] = value
         else:
@@ -325,6 +353,7 @@ class MultimodalDataItem:
         modality = kwargs.pop("modality")
         if isinstance(modality, str):
             modality = Modality[modality]
+        kwargs = {key: _normalize_json_mm_value(value) for key, value in kwargs.items()}
         ret = MultimodalDataItem(modality=modality, **kwargs)
         ret.validate()
         return ret
@@ -427,7 +456,7 @@ class MultimodalInputs:
         ]
         for arg in optional_args:
             if arg in obj:
-                setattr(ret, arg, obj[arg])
+                setattr(ret, arg, _normalize_json_mm_value(obj[arg]))
 
         return ret
 
