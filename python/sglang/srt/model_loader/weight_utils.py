@@ -13,6 +13,7 @@ import logging
 import os
 import tempfile
 from collections import defaultdict
+from functools import lru_cache
 from typing import (
     Any,
     Callable,
@@ -40,6 +41,7 @@ from sglang.srt.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from sglang.srt.environ import envs
 from sglang.srt.layers.dp_attention import get_attention_tp_rank
 from sglang.srt.layers.quantization import QuantizationConfig, get_quantization_config
 from sglang.srt.layers.quantization.fp8 import Fp8Config
@@ -73,6 +75,65 @@ logger = logging.getLogger(__name__)
 # lock files in the temp directory will be automatically deleted when the
 # system reboots, so users will not complain about annoying lock files
 temp_dir = tempfile.gettempdir()
+_MMAP_HOSTILE_FILESYSTEMS = frozenset({"wekafs"})
+
+
+def _decode_proc_mount_path(path: str) -> str:
+    return (
+        path.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+    )
+
+
+@lru_cache(maxsize=512)
+def _get_filesystem_type(path: str) -> Optional[str]:
+    resolved_path = os.path.realpath(path)
+    best_mount_point = ""
+    best_fs_type = None
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mount_point = _decode_proc_mount_path(parts[1])
+                if mount_point == "/":
+                    is_match = resolved_path.startswith("/")
+                else:
+                    prefix = mount_point.rstrip("/") + "/"
+                    is_match = resolved_path == mount_point or resolved_path.startswith(
+                        prefix
+                    )
+                if not is_match:
+                    continue
+                if len(mount_point) > len(best_mount_point):
+                    best_mount_point = mount_point
+                    best_fs_type = parts[2]
+    except OSError as e:
+        logger.warning("Failed to inspect filesystem type for %s: %s", path, e)
+    return best_fs_type
+
+
+def _maybe_disable_mmap_for_files(
+    hf_weights_files: List[str], disable_mmap: bool
+) -> bool:
+    if disable_mmap or not hf_weights_files:
+        return disable_mmap
+    if envs.SGLANG_FORCE_WEIGHT_LOADER_MMAP.get():
+        return disable_mmap
+
+    fs_type = _get_filesystem_type(hf_weights_files[0])
+    if fs_type in _MMAP_HOSTILE_FILESYSTEMS:
+        print_warning_once(
+            f"Detected model weights on {fs_type}. Disabling safetensors mmap "
+            "automatically because file-backed page faults can stall large "
+            "checkpoint loads on this filesystem. Set "
+            "SGLANG_FORCE_WEIGHT_LOADER_MMAP=1 to override."
+        )
+        return True
+    return disable_mmap
 
 
 def get_lock(
@@ -700,6 +761,7 @@ def safetensors_weights_iterator(
     disable_mmap: bool = False,
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
+    disable_mmap = _maybe_disable_mmap_for_files(hf_weights_files, disable_mmap)
     enable_tqdm = (
         not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
     )
@@ -782,6 +844,7 @@ def multi_thread_safetensors_weights_iterator(
     disable_mmap: bool = False,
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Multi-Thread iterate over the weights in the model safetensor files."""
+    disable_mmap = _maybe_disable_mmap_for_files(hf_weights_files, disable_mmap)
     enable_tqdm = (
         not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
     )
@@ -823,6 +886,7 @@ def buffered_multi_thread_safetensors_weights_iterator(
     max_workers loading concurrently + 1 prefetched and ready to yield.
     Peak CPU RAM ≈ (max_workers + 2) × shard_file_size.
     """
+    disable_mmap = _maybe_disable_mmap_for_files(hf_weights_files, disable_mmap)
     enable_tqdm = (
         not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
     )

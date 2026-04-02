@@ -163,6 +163,7 @@ class Envs:
     SGLANG_USE_MODELSCOPE = EnvBool(False)
     SGLANG_SORT_WEIGHT_FILES = EnvBool(False)
     SGLANG_DISABLED_MODEL_ARCHS = EnvTuple(tuple())
+    SGLANG_FORCE_WEIGHT_LOADER_MMAP = EnvBool(False)
 
     # Logging Options
     SGLANG_LOG_GC = EnvBool(False)
